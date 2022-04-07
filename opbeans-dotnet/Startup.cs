@@ -1,18 +1,33 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Globalization;
 using System.Linq;
 using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
 using AutoMapper;
-using Elastic.Apm.NetCoreAll;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using OpbeansDotnet.Data;
 using OpbeansDotnet.Model;
+using OpenTelemetry;
+using OpenTelemetry.Trace;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Instrumentation.AspNetCore;
+using OpenTelemetry.Contrib.Instrumentation.EntityFrameworkCore;
+using OpenTelemetry.Instrumentation.Http;
+using OpenTelemetry.Exporter;
+using OpenTelemetry.Extensions.Hosting;
+using OpenTelemetry.Metrics;
+using Elastic.Apm.NetCoreAll;
 
 //using OpbeansDotnet.Data;
 
@@ -27,8 +42,30 @@ namespace OpbeansDotnet
 		// This method gets called by the runtime. Use this method to add services to the container.
 		public void ConfigureServices(IServiceCollection services)
 		{
+			Console.WriteLine(Environment.GetEnvironmentVariable("APM_AGENT_TYPE"));
 			services.AddMvc();
 			services.AddControllers();
+
+			if(Environment.GetEnvironmentVariable("APM_AGENT_TYPE") == "opentelemetry"){
+				services.AddHttpClient();
+				AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
+				services.AddOpenTelemetryTracing((builder) => builder
+					.SetResourceBuilder(ResourceBuilder.CreateDefault()
+						.AddAttributes(new Dictionary<string, object>{
+							["container.id"] = Utilities.GetContainerId()
+						})
+						.AddTelemetrySdk()
+					)
+					.AddAspNetCoreInstrumentation()
+					.AddHttpClientInstrumentation()
+					.AddOtlpExporter(opt =>
+					{
+						opt.Endpoint = new Uri(Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT"));
+						Console.WriteLine(opt.Endpoint);
+						opt.Protocol = OtlpExportProtocol.Grpc;
+					})
+				);
+			}
 
 			var context = new OpbeansDbContext();
 			context.Database.EnsureCreated();
@@ -42,7 +79,10 @@ namespace OpbeansDotnet
 		// This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
 		public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
 		{
-			app.UseAllElasticApm(Configuration);
+			Console.WriteLine(Environment.GetEnvironmentVariable("APM_AGENT_TYPE"));
+			if(Environment.GetEnvironmentVariable("APM_AGENT_TYPE") == "elasticapm"){
+				app.UseAllElasticApm(Configuration);
+			}
 
 			// Read config environment variables used to demonstrate Distributed Tracing
 			// For more info see: https://github.com/elastic/apm-integration-testing/issues/196
@@ -119,6 +159,12 @@ namespace OpbeansDotnet
 			{
 				endpoints.MapControllers();
 			});
+
+			if(Environment.GetEnvironmentVariable("APM_AGENT_TYPE") == "opentelemetry"){
+				Thread metricsThread = new Thread(SystemMetrics.InitMetrics);
+				metricsThread.Start();
+			}
+
 		}
 
 		private static List<string> KnownApis =>
@@ -138,4 +184,140 @@ namespace OpbeansDotnet
 				"/api/orders/"
 			};
 	}
+
+	public class SystemMetrics {
+
+	private static Meter meter;
+	private static OtlpMetricExporter exporter;
+	private static BaseExportingMetricReader reader;
+	private static Counter<long> memoryUsageCounter;
+	private static ObservableGauge<double> cpuUtilizationGauge;
+
+	public static void InitMetrics()
+	{
+
+		meter = new Meter("OpbeansDotnetMetrics");
+		exporter = new OtlpMetricExporter(new OtlpExporterOptions());
+		reader = new BaseExportingMetricReader(exporter);
+
+		memoryUsageCounter = meter.CreateCounter<long>("system.memory.usage");
+		cpuUtilizationGauge = meter.CreateObservableGauge<double>("system.cpu.utilization", CollectCPUUtilization);
+
+		using var meterProvider = Sdk.CreateMeterProviderBuilder()
+			.SetResourceBuilder(ResourceBuilder.CreateDefault()
+				.AddAttributes(new Dictionary<string, object>{
+					["container.id"] = Utilities.GetContainerId()
+				})
+				.AddTelemetrySdk()
+			)
+			.AddMeter("OpbeansDotnetMetrics")
+			.AddReader(reader)
+			.Build();
+
+		CollectMemoryUsage();
+	}
+
+	public static void CollectMemoryUsage(){
+		while(true){
+			long totalMem = Utilities.GetTotalMemory();
+			long freeMem = Utilities.GetFreeMemory();
+			long usedMem = totalMem - freeMem;
+			memoryUsageCounter.Add(freeMem, new KeyValuePair<string, object>("state", "free"));
+			memoryUsageCounter.Add(usedMem, new KeyValuePair<string, object>("state", "used"));
+			reader.Collect();
+			memoryUsageCounter.Add(-freeMem, new KeyValuePair<string, object>("state", "free"));
+			memoryUsageCounter.Add(-usedMem, new KeyValuePair<string, object>("state", "used"));
+			Thread.Sleep(500);
+		}
+	}
+
+	public static IEnumerable<Measurement<double>> CollectCPUUtilization(){
+
+		var startTime = DateTime.UtcNow;
+		var startCpuUsage = new TimeSpan();
+		foreach(Process p in Process.GetProcesses()){
+			startCpuUsage += p.TotalProcessorTime;
+		}
+		var stopWatch = new Stopwatch();
+		// Start watching CPU
+		stopWatch.Start();
+
+		// Meansure something else, such as .Net Core Middleware
+		Thread.Sleep(500);
+
+		// Stop watching to meansure
+		stopWatch.Stop();
+		var endTime = DateTime.UtcNow;
+		var endCpuUsage = new TimeSpan();
+		foreach(Process p in Process.GetProcesses()){
+			endCpuUsage += p.TotalProcessorTime;
+		}
+
+		var cpuUsedMs = (endCpuUsage - startCpuUsage).TotalMilliseconds;
+		var totalMsPassed = ((endTime - startTime).TotalMilliseconds) * Environment.ProcessorCount;
+		var cpuUsageTotal = cpuUsedMs / totalMsPassed;
+		//Console.WriteLine("CPU" + cpuUsageTotal.ToString());
+		yield return new Measurement<double>(cpuUsageTotal, new KeyValuePair<string, object>("state", "active"), new KeyValuePair<string, object>("cpu", "0"));
+	}
+
+}
+
+public class Utilities {
+
+		public static long GetTotalMemory()
+		{
+				Process process = new Process();
+				process.StartInfo.FileName = "/bin/bash";
+				process.StartInfo.Arguments = "-c + \" "+ "grep MemTotal /proc/meminfo | awk '{print $2}'" + " \"";
+				process.StartInfo.UseShellExecute = false;
+				process.StartInfo.RedirectStandardOutput = true;
+				process.StartInfo.RedirectStandardError = true;
+				process.Start();
+				//* Read the output (or the error)
+				string output = process.StandardOutput.ReadToEnd();
+				//Console.WriteLine(output);
+				string err = process.StandardError.ReadToEnd();
+			  //Console.WriteLine(err);
+				process.WaitForExit();
+				return long.Parse(output)*1024;
+		}
+
+		public static long GetFreeMemory()
+		{
+				Process process = new Process();
+				process.StartInfo.FileName = "/bin/bash";
+				process.StartInfo.Arguments = "-c + \" "+ "grep MemFree /proc/meminfo | awk '{print $2}'" + " \"";
+				process.StartInfo.UseShellExecute = false;
+				process.StartInfo.RedirectStandardOutput = true;
+				process.StartInfo.RedirectStandardError = true;
+				process.Start();
+				//* Read the output (or the error)
+				string output = process.StandardOutput.ReadToEnd();
+				//Console.WriteLine(output);
+				string err = process.StandardError.ReadToEnd();
+				//Console.WriteLine(err);
+				process.WaitForExit();
+				return long.Parse(output)*1024;
+		}
+
+		public static string GetContainerId()
+		{
+				Process process = new Process();
+				process.StartInfo.FileName = "/bin/bash";
+				process.StartInfo.Arguments = "-c + \" "+ "basename $(cat /proc/1/cpuset)" + " \"";
+				process.StartInfo.UseShellExecute = false;
+				process.StartInfo.RedirectStandardOutput = true;
+				process.StartInfo.RedirectStandardError = true;
+				process.Start();
+				//* Read the output (or the error)
+				string output = process.StandardOutput.ReadToEnd();
+				//Console.WriteLine(output);
+				string err = process.StandardError.ReadToEnd();
+				//Console.WriteLine(err);
+				process.WaitForExit();
+				return output;
+		}
+
+	}
+
 }

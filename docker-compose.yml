@@ -13,11 +13,17 @@ services:
           max-file: '5'
     environment:
       - ELASTIC_APM_SERVICE_NAME=${ELASTIC_APM_SERVICE_NAME:-opbeans-dotnet}
-      - ELASTIC_APM_SERVER_URLS=${ELASTIC_APM_SERVER_URL:-http://apm-server:8200}
+      - ELASTIC_APM_SERVER_URL=${ELASTIC_APM_SERVER_URL:-http://apm-server:8200}
       - ELASTIC_APM_JS_SERVER_URL=${ELASTIC_APM_JS_SERVER_URL:-http://localhost:8200}
       - ELASTIC_APM_ENVIRONMENT=testing
       - ELASTIC_APM_LOG_FILE=stderr
       - ELASTIC_APM_LOG_LEVEL=debug
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=${ELASTIC_APM_SERVICE_NAME:-opbeans-node},deployment.environment=production
+      - OTEL_TRACES_EXPORTER=otlp
+      - OTEL_METRICS_EXPORTER=otlp
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://apm-server:8200}
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - APM_AGENT_TYPE=${APM_AGENT_TYPE:-elasticapm}
     depends_on:
       apm-server:
         condition: service_healthy
@@ -47,7 +53,7 @@ services:
       test: ["CMD-SHELL", "exit 0"]
       retries: 10
       interval: 20s
-      
+
   apm-server:
     image: docker.elastic.co/apm/apm-server:${STACK_VERSION:-7.3.0}
     ports:
@@ -144,4 +150,3 @@ services:
 volumes:
   esdata:
     driver: local
-

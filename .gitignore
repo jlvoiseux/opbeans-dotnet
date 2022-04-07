@@ -338,3 +338,5 @@ ASALocalRun/
 # For the BATS testing
 bats/
 target/
+
+.env

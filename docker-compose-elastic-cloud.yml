@@ -18,6 +18,12 @@ services:
       - ELASTIC_APM_ENVIRONMENT=testing
       - ELASTIC_APM_LOG_FILE=stderr
       - ELASTIC_APM_LOG_LEVEL=debug
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=${ELASTIC_APM_SERVICE_NAME:-opbeans-dotnet},deployment.environment=production
+      - OTEL_TRACES_EXPORTER=otlp
+      - OTEL_METRICS_EXPORTER=otlp
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://apm-server:8200}
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - APM_AGENT_TYPE=${APM_AGENT_TYPE:-elasticapm}
     depends_on:
       apm-server:
         condition: service_healthy
@@ -25,7 +31,7 @@ services:
       test: ["CMD-SHELL", "curl -s http://localhost"]
       retries: 10
       interval: 20s
-      
+
   opbeans-frontend:
     build: .
     image: docker.elastic.co/observability-ci/it_opbeans-frontend_nginx:latest
