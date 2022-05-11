@@ -62,7 +62,13 @@ namespace OpbeansDotnet
 					{
 						opt.Endpoint = new Uri(Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT"));
 						Console.WriteLine(opt.Endpoint);
-						opt.Protocol = OtlpExportProtocol.Grpc;
+						if(Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_PROTOCOL") == "http"){
+							opt.Protocol = OtlpExportProtocol.Http;
+						}
+						else {
+							opt.Protocol = OtlpExportProtocol.Grpc;
+						}
+						Console.WriteLine(opt.Protocol);
 					})
 				);
 			}
