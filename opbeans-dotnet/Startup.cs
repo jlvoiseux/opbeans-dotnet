@@ -60,13 +60,14 @@ namespace OpbeansDotnet
 					.AddHttpClientInstrumentation()
 					.AddOtlpExporter(opt =>
 					{
-						opt.Endpoint = new Uri(Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT"));
-						Console.WriteLine(opt.Endpoint);
 						if(Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_PROTOCOL") == "http/protobuf"){
 							opt.Protocol = OtlpExportProtocol.HttpProtobuf;
+							opt.Endpoint = new Uri(Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT") + "/v1/traces");
 						}
 						else {
 							opt.Protocol = OtlpExportProtocol.Grpc;
+							opt.Endpoint = new Uri(Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT"));
+
 						}
 						Console.WriteLine(opt.Protocol);
 					})
@@ -202,8 +203,18 @@ namespace OpbeansDotnet
 	public static void InitMetrics()
 	{
 
-		meter = new Meter("OpbeansDotnetMetrics");
+		OtlpExporterOptions opt = new OtlpExporterOptions();
+		if(Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_PROTOCOL") == "http/protobuf"){
+			opt.Protocol = OtlpExportProtocol.HttpProtobuf;
+			opt.Endpoint = new Uri(Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT") + "/v1/metrics");
+		}
+		else {
+			opt.Protocol = OtlpExportProtocol.Grpc;
+			opt.Endpoint = new Uri(Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT"));
+		}
 		exporter = new OtlpMetricExporter(new OtlpExporterOptions());
+
+		meter = new Meter("OpbeansDotnetMetrics");
 		reader = new BaseExportingMetricReader(exporter);
 
 		memoryUsageCounter = meter.CreateCounter<long>("system.memory.usage");
